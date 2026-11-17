@@ -1,6 +1,6 @@
 import { useEffect, useRef, useSignalValue, useState } from '../../core/hooks';
 import { h, type Child, type VNode } from '../../core/vnode';
-import { focus as defaultFocus, type FocusManager } from '../../focus/focus-manager';
+import { focus as defaultFocus, type FocusManager, type KbKeyDetail } from '../../focus/focus-manager';
 import type { LogicalKey } from '../../focus/keys';
 import type { Player } from '../player';
 import { PlayerState } from '../types';
@@ -94,6 +94,8 @@ export interface VideoPlayerProps {
   onRetry?: () => void;
   /** Auto-hide delay for the controls while playing (ms). Default 4000. */
   osdTimeout?: number;
+  /** Unmount hidden OSD content to reduce idle rendering on low-power devices. Default false. */
+  unmountHiddenControls?: boolean;
   /** Show the stats-for-nerds button. Default true (same as controls.stats). */
   showStats?: boolean;
   /** Show or remove built-in transport buttons (seek, captions, audio, stats, settings). All default to true. */
@@ -141,12 +143,18 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
   const [indicator, setIndicator] = useState<{ icon: string | null; nonce: number }>({ icon: null, nonce: 0 });
   const root = useRef<HTMLDivElement>(null);
   const timeout = props.osdTimeout ?? 4000;
+  const pendingSeek = useRef<{ key: LogicalKey; detail: KbKeyDetail } | null>(null);
 
   const bump = () => setActivity((n) => n + 1);
   const show = (focusId?: string) => {
     setOsd(true);
     bump();
-    if (focusId) requestAnimationFrame(() => manager.focusById(focusId));
+    if (focusId) requestAnimationFrame(() => {
+      const seek = pendingSeek.current;
+      pendingSeek.current = null;
+      if (!root.current || !manager.focusById(focusId)) return;
+      if (seek) manager.dispatchKey(seek.key, seek.detail);
+    });
   };
   const flash = (icon: string | null) => icon && setIndicator((s) => ({ icon, nonce: s.nonce + 1 }));
   const openSettings = (section: SettingsSection = 'root') => {
@@ -174,7 +182,7 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
 
   // Focus the play button whenever the OSD appears without focus inside it.
   useEffect(() => {
-    if (!osd || settings) return;
+    if (!osd || settings || pendingSeek.current) return;
     const cur = manager.current;
     const el = root.current;
     if (!el || !cur || !el.querySelector('.kb-osd') || !el.querySelector('.kb-osd')!.contains(cur)) {
@@ -193,11 +201,11 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
     onInfo: () => (osd ? setOsd(false) : show()),
   });
 
-  const latest = useRef({ osd, settings, settingsEntry, error, live });
-  latest.current = { osd, settings, settingsEntry, error, live };
+  const latest = useRef({ osd, settings, settingsEntry, error, live, unmountHiddenControls: !!props.unmountHiddenControls });
+  latest.current = { osd, settings, settingsEntry, error, live, unmountHiddenControls: !!props.unmountHiddenControls };
   useEffect(
     () =>
-      manager.onKey((key) => {
+      manager.onKey((key, detail) => {
         const s = latest.current;
         // An app overlay owns the keys while focus is inside it.
         const focused = manager.current;
@@ -220,8 +228,9 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
         }
         if (!s.osd) {
           if ((key === 'left' || key === 'right') && s.live !== 'live') {
+            if (s.unmountHiddenControls) pendingSeek.current = { key, detail };
             show('kb-player-progress');
-            return false; // the focused progress bar handles the scrub
+            return s.unmountHiddenControls; // Remounted controls receive the key after focus is restored.
           }
           if (key === 'enter') {
             player.togglePlay();
@@ -271,16 +280,16 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
         <ToggleIndicator icon={indicator.icon} nonce={indicator.nonce} />
         {props.children}
         <div className={['kb-osd', { 'kb-osd--hidden': !osd }]} disableFocus={!osd}>
-          <div className="kb-osd__top">
+          {osd || !props.unmountHiddenControls ? <div className="kb-osd__top">
             <MetadataSection>{props.metadata}</MetadataSection>
-          </div>
-          <div className="kb-osd__bottom" focusGroup={{ orientation: 'vertical', enterTo: 'first' }}>
+          </div> : null}
+          {osd || !props.unmountHiddenControls ? <div className="kb-osd__bottom" focusGroup={{ orientation: 'vertical', enterTo: 'first' }}>
             <div className="kb-osd__timeline">
               <ProgressBar onActivity={bump} />
               <TimeCounter />
             </div>
             <TransportControls buttons={props.controls} onOpenSettings={(sec) => openSettings(sec || 'root')} onToggleStats={props.showStats === false ? undefined : () => setStats((v) => !v)} extra={props.extraControls} start={props.transportStart} end={props.transportEnd} onActivity={bump} />
-          </div>
+          </div> : null}
         </div>
         {stats ? <StatsOverlay /> : null}
         {settings ? <SettingsPanel section={settings} onSection={setSettings} onClose={closeSettings} /> : null}

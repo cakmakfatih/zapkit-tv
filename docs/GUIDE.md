@@ -92,6 +92,9 @@ for TV browsers; its source shows the library in use.
 - **Generic and extensible.** It ships only the controls every player needs. Next episode, channel zapping, "go
   live" or an "up next" card are added by the app through slots (`transportStart`, `transportEnd`,
   `extraControls`, `children`) and the player API. A control the app leaves out is not rendered at all.
+- **Low-power devices.** Set `VideoPlayer`'s `unmountHiddenControls` to remove hidden OSD content and its
+  subscriptions. Controls read the latest state when shown again; video, captions and app overlays remain
+  mounted. The default is `false`, preserving the normal OSD transitions.
 - **Everything is replaceable.** All text lives in `PlayerStrings`, icons can be swapped, and the viewer's
   preferences (volume, quality, caption style) are remembered.
 - **Playlists.** Auto-advance, previous and next, shuffle and loop, and an "up next" countdown for series.
