@@ -144,6 +144,10 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
   const root = useRef<HTMLDivElement>(null);
   const timeout = props.osdTimeout ?? 4000;
   const pendingSeek = useRef<{ key: LogicalKey; detail: KbKeyDetail } | null>(null);
+  const appOverlayFocused = () => {
+    const focused = manager.current;
+    return !!(focused && focused.isConnected && root.current && focused.closest('[data-kb-overlay],.kb-overlay'));
+  };
 
   const bump = () => setActivity((n) => n + 1);
   const show = (focusId?: string) => {
@@ -171,9 +175,13 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
   const playing = state === PlayerState.PLAYING;
   useEffect(() => {
     if (!osd || !playing || settings || error) return;
-    const t = setTimeout(() => setOsd(false), timeout);
+    const t = setTimeout(() => {
+      // App dialogs may be owned by an OSD control; keep its owner mounted until focus returns.
+      if (appOverlayFocused()) return;
+      setOsd(false);
+    }, timeout);
     return () => clearTimeout(t);
-  }, [osd, playing, settings, activity, error]);
+  }, [osd, playing, settings, activity, error, timeout, props.unmountHiddenControls]);
 
   // Show controls when playback pauses or ends.
   useEffect(() => {
@@ -182,7 +190,7 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
 
   // Focus the play button whenever the OSD appears without focus inside it.
   useEffect(() => {
-    if (!osd || settings || pendingSeek.current) return;
+    if (!osd || settings || pendingSeek.current || appOverlayFocused()) return;
     const cur = manager.current;
     const el = root.current;
     if (!el || !cur || !el.querySelector('.kb-osd') || !el.querySelector('.kb-osd')!.contains(cur)) {
@@ -196,9 +204,9 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
       flash(icon);
       bump();
     },
-    onSubtitle: () => openSettings('captions'),
-    onAudio: () => openSettings('audio'),
-    onInfo: () => (osd ? setOsd(false) : show()),
+    onSubtitle: () => { if (!appOverlayFocused()) openSettings('captions'); },
+    onAudio: () => { if (!appOverlayFocused()) openSettings('audio'); },
+    onInfo: () => { if (!appOverlayFocused()) osd ? setOsd(false) : show(); },
   });
 
   const latest = useRef({ osd, settings, settingsEntry, error, live, unmountHiddenControls: !!props.unmountHiddenControls });
@@ -208,8 +216,7 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
       manager.onKey((key, detail) => {
         const s = latest.current;
         // An app overlay owns the keys while focus is inside it.
-        const focused = manager.current;
-        if (focused && root.current && root.current.contains(focused) && focused.closest('[data-kb-overlay]')) return false;
+        if (appOverlayFocused()) return false;
         if (s.error && s.error.fatal) {
           if (key === 'back' && props.onBack) {
             props.onBack();
@@ -279,7 +286,7 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
         <BufferingIndicator />
         <ToggleIndicator icon={indicator.icon} nonce={indicator.nonce} />
         {props.children}
-        <div className={['kb-osd', { 'kb-osd--hidden': !osd }]} disableFocus={!osd}>
+        <div className={['kb-osd', { 'kb-osd--hidden': !osd }]} disableFocus={!osd} onKbfocus={bump}>
           {osd || !props.unmountHiddenControls ? <div className="kb-osd__top">
             <MetadataSection>{props.metadata}</MetadataSection>
           </div> : null}

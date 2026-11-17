@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import { h, render, flushSync, useSignalValue, FocusManager } from '../src/index';
 import { Player, PlayerState, VideoPlayer } from '../src/player/index';
 
-function mount(unmountHiddenControls: boolean) {
+function mount(unmountHiddenControls: boolean, options: Record<string, unknown> = {}) {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  const manager = new FocusManager({ autoFocusFirst: false, pointer: false }).start(root);
+  const manager = new FocusManager({ autoFocusFirst: false, pointer: false }).start(document.body);
   const player = new Player({ persistPrefs: false });
   player.state.value = PlayerState.PLAYING;
   player.duration.value = 120;
@@ -19,8 +19,10 @@ function mount(unmountHiddenControls: boolean) {
     extraRenders++;
     return h('span', { id: 'app-time' }, String(time));
   }
+  const { initialFocus, ...playerOptions } = options;
+  if (initialFocus) manager.focus(initialFocus as Element);
   flushSync(() => render(h(VideoPlayer, {
-    player, focusManager: manager, unmountHiddenControls,
+    player, focusManager: manager, unmountHiddenControls, ...playerOptions,
     extraControls: h(Extra, {}),
   } as any), root));
   return {
@@ -61,6 +63,44 @@ test('modern OSD retains the existing mounted controls behavior', async () => {
     flushSync(() => { f.player.currentTime.value = 70; });
     assert.equal(f.root.querySelector('#app-time')?.textContent, '70');
   } finally { f.close(); }
+});
+
+for (const lowPower of [false, true]) test(`app dialog keeps player focus and controls while open (lowPower=${lowPower})`, async () => {
+  const f = mount(lowPower, { osdTimeout: 80 });
+  const modal = document.createElement('div');
+  modal.className = 'kb-overlay';
+  modal.setAttribute('data-kb-group', JSON.stringify({ trap: true }));
+  const dialog = document.createElement('button');
+  dialog.setAttribute('data-kb-focusable', '');
+  modal.appendChild(dialog);
+  document.body.appendChild(modal);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    f.manager.focus(dialog);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    flushSync();
+    assert.equal(!!f.root.querySelector('.kb-osd--hidden'), false);
+    assert.equal(!!f.root.querySelector('.kb-progress'), true);
+    for (const key of ['up', 'info', 'audio', 'subtitle'] as const) flushSync(() => { f.manager.dispatchKey(key); });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(f.manager.current, dialog);
+    assert.equal(!!f.root.querySelector('.kb-osd--hidden'), false);
+    assert.equal(!!f.root.querySelector('.kb-settings'), false);
+    f.manager.focusById('kb-player-play');
+    await new Promise(resolve => setTimeout(resolve, 120));
+    flushSync();
+    assert.equal(!!f.root.querySelector('.kb-osd--hidden'), true);
+  } finally { modal.remove(); f.close(); }
+});
+
+test('a retained non-dialog focus target does not prevent initial player focus', async () => {
+  const previous = document.createElement('button');
+  document.body.appendChild(previous);
+  const f = mount(true, { initialFocus: previous });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(f.manager.current?.getAttribute('data-focus-id'), 'kb-player-play');
+  } finally { previous.remove(); f.close(); }
 });
 
 test('low-power OSD preserves the first seek key and restores progress focus', async () => {
