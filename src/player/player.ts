@@ -122,6 +122,8 @@ export class Player {
   private loadToken = 0;
   private fallbackIndex = 0;
   private startedPlayback = false;
+  private playRequested = false;
+  private retryNativePlay = false;
   private shuffle = false;
   private shuffleOrder: number[] = [];
   private loop = false;
@@ -179,7 +181,10 @@ export class Player {
 
   private async open(source: VideoSource, startTime: number | undefined, autoplay: boolean): Promise<void> {
     const token = ++this.loadToken;
+    this.playRequested = false;
+    this.retryNativePlay = false;
     this.teardownEngine();
+    this.playRequested = autoplay;
     this.fallbackIndex = 0;
     this.startedPlayback = false;
     this.upNextDismissed = false;
@@ -221,15 +226,15 @@ export class Player {
 
   private async startEngine(source: VideoSource, variant: { url: string; type?: StreamType }, startTime: number | undefined, autoplay: boolean, token: number) {
     const effective: VideoSource = { ...source, url: variant.url, type: variant.type || (variant === source ? source.type : undefined) };
-    const engine = this.createEngine(effective);
-    if (!engine) {
-      this.fail({ code: 'unsupported', message: 'No engine can play ' + effective.url, fatal: true }, token, autoplay, startTime);
-      return;
-    }
-    this.engine = engine;
-    this.engineName.value = engine.name;
-    this.video.playbackRate = this.playbackRate.value;
     try {
+      const engine = this.createEngine(effective);
+      if (!engine) {
+        this.fail({ code: 'unsupported', message: 'No engine can play ' + effective.url, fatal: true }, token, autoplay, startTime);
+        return;
+      }
+      this.engine = engine;
+      this.engineName.value = engine.name;
+      if (this.video.playbackRate !== this.playbackRate.value) this.video.playbackRate = this.playbackRate.value;
       await engine.load(this.video, effective, startTime, this.engineCallbacks(token, autoplay, startTime));
     } catch (e) {
       if (token !== this.loadToken) return;
@@ -341,21 +346,39 @@ export class Player {
 
   // ---- transport -------------------------------------------------------
 
-  play(): Promise<void> {
-    const p = this.video.play();
-    if (!p) return Promise.resolve();
-    return p.catch((e: Error) => {
-      // Autoplay with sound blocked (desktop browsers): retry muted.
-      if (e.name === 'NotAllowedError' && !this.video.muted) {
+  async play(): Promise<void> {
+    this.playRequested = true;
+    this.retryNativePlay = this.engine?.name === 'native' && this.video.readyState < 3;
+    const token = this.loadToken;
+    const engine = this.engine;
+    const current = () => !this.destroyed && token === this.loadToken && engine === this.engine;
+    const fail = (error: unknown) => {
+      if (!current()) return;
+      const e = error as Error;
+      if (e.name === 'AbortError') return;
+      this.playRequested = false;
+      this.retryNativePlay = false;
+      if (e.name === 'NotAllowedError') {
+        this.setState(PlayerState.PAUSED);
+        return;
+      }
+      this.fail({ code: e.name === 'NotSupportedError' ? 'unsupported' : 'decode', message: e.message || 'Playback could not start', fatal: true, cause: e }, token, true, this.video.currentTime || undefined);
+    };
+    try {
+      await this.video.play();
+    } catch (error) {
+      if (!current()) return;
+      if ((error as Error).name === 'NotAllowedError' && !this.video.muted) {
         this.autoplayMuted = true;
         this.video.muted = true;
-        return this.video.play().catch(() => this.setState(PlayerState.PAUSED));
-      }
-      if (e.name !== 'AbortError') this.setState(PlayerState.PAUSED);
-    });
+        try { await this.video.play(); } catch (retryError) { fail(retryError); }
+      } else fail(error);
+    }
   }
 
   pause(): void {
+    this.playRequested = false;
+    this.retryNativePlay = false;
     this.video.pause();
   }
 
@@ -366,6 +389,8 @@ export class Player {
 
   /** Stops playback and unloads the source (stopVideo). */
   stop(): void {
+    this.playRequested = false;
+    this.retryNativePlay = false;
     this.loadToken++;
     this.teardownEngine();
     this.stopCountdown();
@@ -779,7 +804,15 @@ export class Player {
     };
     on('playing', () => {
       this.startedPlayback = true;
+      this.retryNativePlay = false;
       this.setState(PlayerState.PLAYING);
+    });
+    on('canplay', () => {
+      // Some TV engines ignore an early play() call and return no promise.
+      if (this.retryNativePlay && this.playRequested && !this.startedPlayback && v.paused && this.source.peek()) {
+        this.retryNativePlay = false;
+        void this.play();
+      }
     });
     on('play', () => this.state.peek() !== PlayerState.PLAYING && v.readyState < 3 && this.setState(PlayerState.BUFFERING));
     on('pause', () => !v.ended && this.setState(PlayerState.PAUSED));

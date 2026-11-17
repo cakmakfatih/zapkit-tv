@@ -28,12 +28,12 @@ export class NativeEngine implements Engine {
 
   async load(video: HTMLVideoElement, source: VideoSource, startTime: number | undefined, cb: EngineCallbacks): Promise<void> {
     this.video = video;
-    video.src = source.url;
     if (startTime && startTime > 0) {
       const seek = () => {
         if (isFinite(video.duration) || video.seekable.length) video.currentTime = startTime;
       };
       video.addEventListener('loadedmetadata', seek, { once: true });
+      this.cleanups.push(() => video.removeEventListener('loadedmetadata', seek));
     }
     const onMeta = () => {
       if (video.videoHeight) {
@@ -68,6 +68,7 @@ export class NativeEngine implements Engine {
       text.addEventListener('addtrack', onText);
       this.cleanups.push(() => text.removeEventListener('addtrack', onText));
     }
+    video.src = source.url;
     video.load();
   }
 
