@@ -53,6 +53,8 @@ export interface PlayerOptions {
   upNextLead?: number;
   /** Jump small gaps in the buffer and recover from stalls. Default true. */
   gapJumping?: boolean;
+  /** Skip duplicate progress polling while the media element is sending regular time updates. Default false. */
+  preferNativeTimeUpdates?: boolean;
   /** Distance (s) from the live edge still counted as "at live head". Default 10. */
   liveHeadTolerance?: number;
 }
@@ -65,6 +67,8 @@ export interface UpNextInfo {
 }
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const PROGRESS_POLL_MS = 250;
+const NATIVE_TIME_UPDATE_GRACE_MS = 300;
 
 function detectType(source: { url: string; type?: StreamType }): StreamType {
   if (source.type && source.type !== 'auto') return source.type;
@@ -142,6 +146,7 @@ export class Player {
       autoAdvanceDelay: 10,
       upNextLead: 20,
       gapJumping: true,
+      preferNativeTimeUpdates: false,
       liveHeadTolerance: 10,
       ...options,
     };
@@ -829,7 +834,11 @@ export class Player {
       this.events.emit('onReady');
     });
     on('durationchange', () => this.updateDuration());
-    on('timeupdate', () => this.onTime());
+    let lastNativeTimeUpdate = -Infinity;
+    on('timeupdate', () => {
+      if (this.opts.preferNativeTimeUpdates) lastNativeTimeUpdate = Date.now();
+      this.onTime();
+    });
     on('progress', () => this.updateBuffered());
     on('volumechange', () => {
       const volume = Math.round(v.volume * 100);
@@ -864,11 +873,13 @@ export class Player {
       document.addEventListener('visibilitychange', onVis);
       this.cleanups.push(() => document.removeEventListener('visibilitychange', onVis));
     }
-    // Faster time updates than `timeupdate` (~4 Hz) for captions, cue ranges and gap checks.
+    // Some TV engines either repeat or stop sending timeupdate; keep polling as a fallback.
     this.gapTimer = setInterval(() => {
-      if (!v.paused) this.onTime();
+      if (!v.paused && (!this.opts.preferNativeTimeUpdates || Date.now() - lastNativeTimeUpdate >= NATIVE_TIME_UPDATE_GRACE_MS)) {
+        this.onTime();
+      }
       if (this.opts.gapJumping) this.checkStall();
-    }, 250);
+    }, PROGRESS_POLL_MS);
   }
 
   private updateDuration() {
@@ -883,11 +894,13 @@ export class Player {
     this.events.emit('onLoadProgress', this.bufferedEnd.peek());
   }
 
-  private updateBuffered() {
-    const v = this.video;
-    const b = v.buffered;
+  private updateBuffered(time = this.video.currentTime) {
+    const b = this.video.buffered;
     let end = 0;
-    for (let i = 0; i < b.length; i++) if (v.currentTime >= b.start(i) - 0.2 && v.currentTime <= b.end(i)) end = b.end(i);
+    for (let i = 0; i < b.length; i++) {
+      const rangeEnd = b.end(i);
+      if (time >= b.start(i) - 0.2 && time <= rangeEnd) end = rangeEnd;
+    }
     this.bufferedEnd.value = end;
     this.events.emit('onLoadProgress', end);
   }
@@ -905,7 +918,7 @@ export class Player {
         this.seekable.value = r;
         if (r) this.duration.value = r.end;
       }
-      this.updateBuffered();
+      this.updateBuffered(t);
       this.updateCues(t);
       this.updateUpNext(t);
     });

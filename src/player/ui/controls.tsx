@@ -110,6 +110,8 @@ export function LiveBadge(): VNode {
 LiveBadge.displayName = 'LiveBadge';
 
 export interface ProgressBarProps {
+  /** Step in seconds starting with the third quick press in the same direction. */
+  burstStep?: number;
   /** Seconds per step on a single press. Default 10. */
   step?: number;
   /** Delay (ms) after the last press before the scrub position is committed. Default 700. */
@@ -131,6 +133,7 @@ export function ProgressBar(props: ProgressBarProps): VNode {
   const live = useSignalValue(player.liveMode);
   const [scrub, setScrub] = useState<number | null>(null);
   const repeats = useRef(0);
+  const burst = useRef({ direction: '', count: 0 });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrubRef = useRef<number | null>(null);
   scrubRef.current = scrub;
@@ -148,6 +151,8 @@ export function ProgressBar(props: ProgressBarProps): VNode {
     const target = scrubRef.current;
     if (target != null) player.seekTo(target);
     repeats.current = 0;
+    burst.current = { direction: '', count: 0 };
+    scrubRef.current = null;
     setScrub(null);
   };
 
@@ -161,11 +166,15 @@ export function ProgressBar(props: ProgressBarProps): VNode {
     if (key === 'left' || key === 'right') {
       e.preventDefault();
       repeats.current = e.detail.repeat ? repeats.current + 1 : 0;
+      burst.current = { direction: key, count: burst.current.direction === key ? burst.current.count + 1 : 1 };
       const base = props.step || 10;
       const accel = 1 + Math.floor(repeats.current / 4);
-      const step = Math.min(base * accel * accel, Math.max(base, span / 20));
+      const step = props.burstStep && burst.current.count >= 3
+        ? props.burstStep
+        : Math.min(base * accel * accel, Math.max(base, span / 20));
       const from = scrubRef.current != null ? scrubRef.current : player.video.currentTime;
       const next = Math.max(start, Math.min(end - 1, from + (key === 'left' ? -step : step)));
+      scrubRef.current = next;
       setScrub(next);
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(commit, props.commitDelay || 700);

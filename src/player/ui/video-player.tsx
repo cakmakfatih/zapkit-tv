@@ -96,6 +96,8 @@ export interface VideoPlayerProps {
   osdTimeout?: number;
   /** Unmount hidden OSD content to reduce idle rendering on low-power devices. Default false. */
   unmountHiddenControls?: boolean;
+  /** Seek step in seconds starting with the third quick press in the same direction. */
+  seekBurstStep?: number;
   /** Show the stats-for-nerds button. Default true (same as controls.stats). */
   showStats?: boolean;
   /** Show or remove built-in transport buttons (seek, captions, audio, stats, settings). All default to true. */
@@ -292,7 +294,7 @@ export function VideoPlayer(props: VideoPlayerProps): VNode {
           </div> : null}
           {osd || !props.unmountHiddenControls ? <div className="kb-osd__bottom" focusGroup={{ orientation: 'vertical', enterTo: 'first' }}>
             <div className="kb-osd__timeline">
-              <ProgressBar onActivity={bump} />
+              <ProgressBar burstStep={props.seekBurstStep} onActivity={bump} />
               <TimeCounter />
             </div>
             <TransportControls buttons={props.controls} onOpenSettings={(sec) => openSettings(sec || 'root')} onToggleStats={props.showStats === false ? undefined : () => setStats((v) => !v)} extra={props.extraControls} start={props.transportStart} end={props.transportEnd} onActivity={bump} />

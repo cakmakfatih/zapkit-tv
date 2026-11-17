@@ -118,3 +118,22 @@ test('low-power OSD preserves the first seek key and restores progress focus', a
     assert.equal(f.player.video.currentTime, 40);
   } finally { f.close(); }
 });
+
+test('rapid seek taps use the configured jump from the third tap and reset on a direction change', async () => {
+  const f = mount(false, { seekBurstStep: 30 });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    f.manager.focusById('kb-player-progress');
+    const preview = () => f.root.querySelector('.kb-progress')?.getAttribute('aria-valuenow');
+    flushSync(() => { f.manager.dispatchKey('right'); });
+    assert.equal(preview(), '40');
+    flushSync(() => { f.manager.dispatchKey('right'); f.manager.dispatchKey('right'); });
+    assert.equal(preview(), '80');
+    flushSync(() => { f.manager.dispatchKey('left'); });
+    assert.equal(preview(), '70');
+    flushSync(() => { f.manager.dispatchKey('enter'); });
+    assert.equal(f.player.video.currentTime, 70);
+    flushSync(() => { f.manager.dispatchKey('left'); });
+    assert.equal(preview(), '60');
+  } finally { f.close(); }
+});

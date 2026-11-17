@@ -1,11 +1,11 @@
 import { tick } from './setup';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Player, PlayerState } from '../src/player/index';
+import { Player, PlayerState, type PlayerOptions } from '../src/player/index';
 import { NativeEngine } from '../src/player/engines/native';
 import type { Engine, EngineCallbacks } from '../src/player/engines/engine';
 
-function fixture() {
+function fixture(options: PlayerOptions = {}) {
   const video = document.createElement('video');
   video.load = () => {};
   video.pause = () => {};
@@ -15,9 +15,43 @@ function fixture() {
     setAudioTrack: () => {}, isLive: () => false, seekableRange: () => null, liveEdge: () => null,
     stats: () => ({ bandwidth: 0, bitrate: 0, codecs: '', liveLatency: null }),
   };
-  const player = new Player({ video, engines: [() => engine], persistPrefs: false });
+  const player = new Player({ video, engines: [() => engine], persistPrefs: false, ...options });
   return { video, player };
 }
+
+test('low-power playback skips redundant polling and keeps a fallback when native events stop', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 0 });
+  const normal = fixture({ gapJumping: false });
+  const lowPower = fixture({ gapJumping: false, preferNativeTimeUpdates: true });
+  const progress = [0, 0];
+  const buffers = [0, 0];
+  try {
+    [normal, lowPower].forEach(({ player, video }, i) => {
+      Object.defineProperty(video, 'paused', { value: false });
+      Object.defineProperty(video, 'buffered', { get: () => { buffers[i]++; return { length: 0 }; } });
+      player.on('onVideoProgress', () => { progress[i]++; });
+    });
+    for (let i = 1; i <= 4; i++) {
+      t.mock.timers.tick(125);
+      for (const { video } of [normal, lowPower]) {
+        video.currentTime = i * 0.25;
+        video.dispatchEvent(new window.Event('timeupdate'));
+      }
+      t.mock.timers.tick(125);
+    }
+    assert.deepEqual(progress, [8, 4]);
+    assert.deepEqual(buffers, [8, 4]);
+    lowPower.video.currentTime = 1.25;
+    t.mock.timers.tick(250);
+    assert.equal(progress[1], 5);
+    assert.equal(lowPower.player.currentTime.peek(), 1.25);
+    lowPower.player.seekTo(40);
+    assert.equal(lowPower.player.currentTime.peek(), 40);
+  } finally {
+    normal.player.destroy();
+    lowPower.player.destroy();
+  }
+});
 
 test('startup: legacy native playback is retried when media becomes ready', async () => {
   const { video, player } = fixture();
