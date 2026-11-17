@@ -125,7 +125,8 @@ export function registerPlatformKeys(keys: string[] = [
   'MediaTrackNext', 'MediaTrackPrevious', 'ColorF0Red', 'ColorF1Green', 'ColorF2Yellow', 'ColorF3Blue',
   'ChannelUp', 'ChannelDown', 'Info',
 ]): void {
-  const tizen = (globalThis as { tizen?: { tvinputdevice?: { registerKey(k: string): void } } }).tizen;
+  const platform = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : {};
+  const tizen = (platform as { tizen?: { tvinputdevice?: { registerKey(k: string): void } } }).tizen;
   if (!tizen || !tizen.tvinputdevice) return;
   for (const k of keys) {
     try {
@@ -146,7 +147,7 @@ export function registerPlatformKeys(keys: string[] = [
  * `"disableBackHistoryAPI": true`; without it webOS handles Back itself and never reaches this code.
  */
 export function exitApp(): void {
-  const w = globalThis as any;
+  const w = (typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : {}) as any;
   const attempts: Array<() => boolean> = [
     () => typeof w.PalmSystem?.platformBack === 'function' && (w.PalmSystem.platformBack(), true),
     () => typeof w.Hisense_ExitApp === 'function' && (w.Hisense_ExitApp(), true),
