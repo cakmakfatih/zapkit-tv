@@ -126,6 +126,7 @@ export class Player {
   private loadToken = 0;
   private fallbackIndex = 0;
   private startedPlayback = false;
+  private reloadingSource = false;
   private playRequested = false;
   private retryNativePlay = false;
   private shuffle = false;
@@ -184,7 +185,7 @@ export class Player {
     return this.playVideoAt(index, startTime);
   }
 
-  private async open(source: VideoSource, startTime: number | undefined, autoplay: boolean): Promise<void> {
+  private prepareEngineLoad(autoplay: boolean): number {
     const token = ++this.loadToken;
     this.playRequested = false;
     this.retryNativePlay = false;
@@ -192,6 +193,29 @@ export class Player {
     this.playRequested = autoplay;
     this.fallbackIndex = 0;
     this.startedPlayback = false;
+    return token;
+  }
+
+  /** Reopen the current media at a position without replacing the title or controls state. */
+  reloadSource(position = this.currentTime.peek(), autoplay = true): Promise<void> {
+    const source = this.source.peek();
+    if (!source) return Promise.resolve();
+    this.reloadingSource = true;
+    const token = this.prepareEngineLoad(autoplay);
+    this.captionLoad++;
+    batch(() => {
+      this.error.value = null;
+      this.currentTime.value = position;
+      this.bufferedEnd.value = position;
+      this.updateCues(position);
+      this.setState(PlayerState.BUFFERING);
+    });
+    return this.startEngine(source, source, position, autoplay, token);
+  }
+
+  private async open(source: VideoSource, startTime: number | undefined, autoplay: boolean): Promise<void> {
+    this.reloadingSource = false;
+    const token = this.prepareEngineLoad(autoplay);
     this.upNextDismissed = false;
     this.stopCountdown();
     batch(() => {
@@ -231,8 +255,9 @@ export class Player {
 
   private async startEngine(source: VideoSource, variant: { url: string; type?: StreamType }, startTime: number | undefined, autoplay: boolean, token: number) {
     const effective: VideoSource = { ...source, url: variant.url, type: variant.type || (variant === source ? source.type : undefined) };
+    let engine: Engine | null = null;
     try {
-      const engine = this.createEngine(effective);
+      engine = this.createEngine(effective);
       if (!engine) {
         this.fail({ code: 'unsupported', message: 'No engine can play ' + effective.url, fatal: true }, token, autoplay, startTime);
         return;
@@ -240,19 +265,17 @@ export class Player {
       this.engine = engine;
       this.engineName.value = engine.name;
       if (this.video.playbackRate !== this.playbackRate.value) this.video.playbackRate = this.playbackRate.value;
-      await engine.load(this.video, effective, startTime, this.engineCallbacks(token, autoplay, startTime));
+      await engine.load(this.video, effective, startTime, this.engineCallbacks(engine, token, autoplay, startTime));
     } catch (e) {
-      if (token !== this.loadToken) return;
+      if (token !== this.loadToken || (engine && engine !== this.engine)) return;
       const err = e as Error & { code?: PlayerErrorInfo['code'] };
       this.fail({ code: err.code || 'manifest', message: err.message, fatal: true, cause: e }, token, autoplay, startTime);
       return;
     }
-    if (token !== this.loadToken) return;
-    this.applyQualityPref();
-    if (this.prefs.audioLang) this.selectAudioByLang(this.prefs.audioLang);
-    if (autoplay) {
-      this.play();
-    } else {
+    if (token !== this.loadToken || engine !== this.engine) return;
+    if (autoplay && this.playRequested) {
+      void this.play();
+    } else if (!autoplay && !this.reloadingSource) {
       this.setState(PlayerState.CUED);
     }
   }
@@ -272,12 +295,23 @@ export class Player {
     return new NativeEngine();
   }
 
-  private engineCallbacks(token: number, autoplay: boolean, startTime: number | undefined): EngineCallbacks {
-    const live = () => token === this.loadToken;
+  private engineCallbacks(engine: Engine, token: number, autoplay: boolean, startTime: number | undefined): EngineCallbacks {
+    const live = () => token === this.loadToken && this.engine === engine;
+    let qualityReady = false;
+    let audioReady = false;
     return {
       qualities: (levels) => {
         if (!live()) return;
         this.qualities.value = levels;
+        if (levels.length && !qualityReady) {
+          qualityReady = true;
+          const cap = this.prefs.quality;
+          const level = cap && levels.filter(q => q.height <= cap).sort((a, b) => b.height - a.height)[0];
+          if (level) {
+            engine.setQuality(level.id);
+            this.autoQuality.value = false;
+          }
+        }
         this.events.emit('onAvailableQualityLevelsChange', levels);
       },
       quality: (level) => {
@@ -288,6 +322,11 @@ export class Player {
       audioTracks: (tracks) => {
         if (!live()) return;
         this.audioTracks.value = tracks;
+        if (tracks.length && !audioReady) {
+          audioReady = true;
+          const track = this.prefs.audioLang && tracks.find(a => a.lang === this.prefs.audioLang);
+          if (track && this.audioTrack.peek()?.id !== track.id) engine.setAudioTrack(track.id);
+        }
         this.events.emit('onAudioTracksChange', tracks);
       },
       audioTrack: (track) => {
@@ -325,18 +364,22 @@ export class Player {
     }
     this.error.value = info;
     this.events.emit('onError', info);
-    if (info.fatal) this.setState(PlayerState.UNSTARTED);
+    if (info.fatal) {
+      this.reloadingSource = false;
+      this.setState(PlayerState.UNSTARTED);
+    }
   }
 
   private teardownEngine() {
-    if (this.engine) {
+    const engine = this.engine;
+    this.engine = null;
+    if (engine) {
       try {
-        this.engine.destroy();
+        engine.destroy();
       } catch {
         // ignore
       }
     }
-    this.engine = null;
   }
 
   private async loadStoryboard(source: VideoSource) {
@@ -364,6 +407,7 @@ export class Player {
       this.playRequested = false;
       this.retryNativePlay = false;
       if (e.name === 'NotAllowedError') {
+        this.reloadingSource = false;
         this.setState(PlayerState.PAUSED);
         return;
       }
@@ -382,9 +426,12 @@ export class Player {
   }
 
   pause(): void {
+    const reloading = this.reloadingSource;
+    this.reloadingSource = false;
     this.playRequested = false;
     this.retryNativePlay = false;
     this.video.pause();
+    if (reloading) this.setState(PlayerState.PAUSED);
   }
 
   togglePlay(): void {
@@ -394,6 +441,7 @@ export class Player {
 
   /** Stops playback and unloads the source (stopVideo). */
   stop(): void {
+    this.reloadingSource = false;
     this.playRequested = false;
     this.retryNativePlay = false;
     this.loadToken++;
@@ -485,27 +533,6 @@ export class Player {
     if (this.engine) this.engine.setQualityRange(minHeight, maxHeight);
   }
 
-  private applyQualityPref() {
-    const cap = this.prefs.quality;
-    if (!cap || !this.engine) return;
-    const apply = () => {
-      const level = this.qualities.peek().filter((q) => q.height <= cap).sort((a, b) => b.height - a.height)[0];
-      if (level && this.engine) {
-        this.engine.setQuality(level.id);
-        this.autoQuality.value = false;
-      }
-    };
-    if (this.qualities.peek().length) apply();
-    else {
-      const off = this.qualities.subscribe((levels) => {
-        if (levels.length) {
-          off();
-          apply();
-        }
-      });
-    }
-  }
-
   setAudioTrack(id: string): void {
     if (!this.engine) return;
     this.engine.setAudioTrack(id);
@@ -518,20 +545,6 @@ export class Player {
         savePref('audioLang', track.lang);
       }
     }
-  }
-
-  private selectAudioByLang(lang: string) {
-    const pick = () => {
-      const t = this.audioTracks.peek().find((a) => a.lang === lang);
-      if (t && this.audioTrack.peek() !== t && this.engine) this.engine.setAudioTrack(t.id);
-    };
-    pick();
-    const off = this.audioTracks.subscribe((tracks) => {
-      if (tracks.length) {
-        off();
-        pick();
-      }
-    });
   }
 
   /** Shows a caption track by id, or hides captions with null. */
@@ -801,17 +814,20 @@ export class Player {
     this.events.emit('onStateChange', s);
   }
 
+  private markPlaying() {
+    this.reloadingSource = false;
+    this.startedPlayback = true;
+    this.retryNativePlay = false;
+    this.setState(PlayerState.PLAYING);
+  }
+
   private bindVideo() {
     const v = this.video;
     const on = (type: string, fn: () => void) => {
       v.addEventListener(type, fn);
       this.cleanups.push(() => v.removeEventListener(type, fn));
     };
-    on('playing', () => {
-      this.startedPlayback = true;
-      this.retryNativePlay = false;
-      this.setState(PlayerState.PLAYING);
-    });
+    on('playing', () => this.markPlaying());
     on('canplay', () => {
       // Some TV engines ignore an early play() call and return no promise.
       if (this.retryNativePlay && this.playRequested && !this.startedPlayback && v.paused && this.source.peek()) {
@@ -820,11 +836,24 @@ export class Player {
       }
     });
     on('play', () => this.state.peek() !== PlayerState.PLAYING && v.readyState < 3 && this.setState(PlayerState.BUFFERING));
-    on('pause', () => !v.ended && this.setState(PlayerState.PAUSED));
+    on('pause', () => !this.reloadingSource && !v.ended && this.setState(PlayerState.PAUSED));
     on('waiting', () => !v.paused && this.setState(PlayerState.BUFFERING));
     on('seeking', () => !v.paused && this.setState(PlayerState.BUFFERING));
-    on('seeked', () => this.setState(v.paused ? PlayerState.PAUSED : v.readyState >= 3 ? PlayerState.PLAYING : PlayerState.BUFFERING));
-    on('canplay', () => this.state.peek() === PlayerState.BUFFERING && !v.paused && this.setState(PlayerState.PLAYING));
+    const readyAfterReload = () => {
+      if (!this.reloadingSource || this.playRequested || v.seeking || v.readyState < 2) return false;
+      this.reloadingSource = false;
+      this.setState(PlayerState.CUED);
+      return true;
+    };
+    on('loadeddata', readyAfterReload);
+    on('seeked', () => {
+      if (readyAfterReload() || this.reloadingSource) return;
+      this.setState(v.paused ? PlayerState.PAUSED : v.readyState >= 3 ? PlayerState.PLAYING : PlayerState.BUFFERING);
+    });
+    on('canplay', () => {
+      if (readyAfterReload() || this.reloadingSource) return;
+      if (this.state.peek() === PlayerState.BUFFERING && !v.paused) this.setState(PlayerState.PLAYING);
+    });
     on('ended', () => {
       this.setState(PlayerState.ENDED);
       this.onEnded();
@@ -868,7 +897,7 @@ export class Player {
 
     if (this.opts.pauseWhenHidden && typeof document !== 'undefined') {
       const onVis = () => {
-        if (document.hidden && !v.paused) v.pause();
+        if (document.hidden && (this.playRequested || !v.paused)) this.pause();
       };
       document.addEventListener('visibilitychange', onVis);
       this.cleanups.push(() => document.removeEventListener('visibilitychange', onVis));
@@ -878,11 +907,12 @@ export class Player {
       if (!v.paused && (!this.opts.preferNativeTimeUpdates || Date.now() - lastNativeTimeUpdate >= NATIVE_TIME_UPDATE_GRACE_MS)) {
         this.onTime();
       }
-      if (this.opts.gapJumping) this.checkStall();
+      if (this.opts.gapJumping && !this.reloadingSource) this.checkStall();
     }, PROGRESS_POLL_MS);
   }
 
   private updateDuration() {
+    if (this.reloadingSource && this.video.readyState === 0) return;
     const engine = this.engine;
     const live = (engine && engine.isLive()) || this.video.duration === Infinity || !!(this.source.peek() && this.source.peek()!.live);
     const range = engine ? engine.seekableRange() : null;
@@ -907,6 +937,11 @@ export class Player {
 
   private onTime() {
     const t = this.video.currentTime;
+    if (this.reloadingSource) {
+      if (!this.playRequested || this.video.paused || this.video.seeking || this.video.readyState < 2
+          || t <= this.currentTime.peek() + 0.05) return;
+      this.markPlaying();
+    }
     if (this.loopRange && t >= this.loopRange.end) {
       this.seekTo(this.loopRange.start);
       return;

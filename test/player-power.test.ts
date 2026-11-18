@@ -137,3 +137,21 @@ test('rapid seek taps use the configured jump from the third tap and reset on a 
     assert.equal(preview(), '60');
   } finally { f.close(); }
 });
+
+test('a renewed media connection keeps the same video and visible controls', async () => {
+  const f = mount(true, { osdTimeout: 1000 });
+  try {
+    await tick();
+    const video = f.player.video;
+    video.load = () => {};
+    video.play = () => Promise.resolve();
+    f.player.source.value = { url: 'https://media.example/video.mp4' };
+    const controls = f.root.querySelector('.kb-osd__bottom');
+    await f.player.reloadSource(30);
+    video.dispatchEvent(new window.Event('pause'));
+    flushSync();
+    assert.equal(f.root.querySelector('video'), video);
+    assert.equal(f.root.querySelector('.kb-osd__bottom'), controls);
+    assert.equal(f.player.getState(), PlayerState.BUFFERING);
+  } finally { f.close(); }
+});
