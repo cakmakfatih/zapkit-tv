@@ -127,6 +127,7 @@ export class Player {
   private fallbackIndex = 0;
   private startedPlayback = false;
   private reloadingSource = false;
+  private retryReloadPlay = false;
   private playRequested = false;
   private retryNativePlay = false;
   private shuffle = false;
@@ -189,6 +190,7 @@ export class Player {
     const token = ++this.loadToken;
     this.playRequested = false;
     this.retryNativePlay = false;
+    this.retryReloadPlay = false;
     this.teardownEngine();
     this.playRequested = autoplay;
     this.fallbackIndex = 0;
@@ -274,6 +276,7 @@ export class Player {
     }
     if (token !== this.loadToken || engine !== this.engine) return;
     if (autoplay && this.playRequested) {
+      this.retryReloadPlay = this.reloadingSource;
       void this.play();
     } else if (!autoplay && !this.reloadingSource) {
       this.setState(PlayerState.CUED);
@@ -403,7 +406,10 @@ export class Player {
     const fail = (error: unknown) => {
       if (!current()) return;
       const e = error as Error;
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') {
+        this.resumeReloadPlayback();
+        return;
+      }
       this.playRequested = false;
       this.retryNativePlay = false;
       if (e.name === 'NotAllowedError') {
@@ -821,14 +827,28 @@ export class Player {
     this.setState(PlayerState.PLAYING);
   }
 
+  private resumeReloadPlayback() {
+    const v = this.video;
+    if (!this.reloadingSource || !this.retryReloadPlay || !this.playRequested
+        || !v.paused || v.ended || v.seeking || v.readyState < 2 || v.error) return;
+    this.retryReloadPlay = false;
+    void this.play();
+  }
+
   private bindVideo() {
     const v = this.video;
     const on = (type: string, fn: () => void) => {
       v.addEventListener(type, fn);
       this.cleanups.push(() => v.removeEventListener(type, fn));
     };
-    on('playing', () => this.markPlaying());
+    on('playing', () => {
+      if (!this.reloadingSource) this.markPlaying();
+    });
     on('canplay', () => {
+      if (this.reloadingSource) {
+        this.resumeReloadPlayback();
+        return;
+      }
       // Some TV engines ignore an early play() call and return no promise.
       if (this.retryNativePlay && this.playRequested && !this.startedPlayback && v.paused && this.source.peek()) {
         this.retryNativePlay = false;
@@ -836,7 +856,10 @@ export class Player {
       }
     });
     on('play', () => this.state.peek() !== PlayerState.PLAYING && v.readyState < 3 && this.setState(PlayerState.BUFFERING));
-    on('pause', () => !this.reloadingSource && !v.ended && this.setState(PlayerState.PAUSED));
+    on('pause', () => {
+      if (this.reloadingSource) this.resumeReloadPlayback();
+      else if (v.paused && !v.ended) this.setState(PlayerState.PAUSED);
+    });
     on('waiting', () => !v.paused && this.setState(PlayerState.BUFFERING));
     on('seeking', () => !v.paused && this.setState(PlayerState.BUFFERING));
     const readyAfterReload = () => {
@@ -847,6 +870,7 @@ export class Player {
     };
     on('loadeddata', readyAfterReload);
     on('seeked', () => {
+      this.resumeReloadPlayback();
       if (readyAfterReload() || this.reloadingSource) return;
       this.setState(v.paused ? PlayerState.PAUSED : v.readyState >= 3 ? PlayerState.PLAYING : PlayerState.BUFFERING);
     });
@@ -938,8 +962,9 @@ export class Player {
   private onTime() {
     const t = this.video.currentTime;
     if (this.reloadingSource) {
+      // A decoder can emit playing for the first frame before the resume seek settles.
       if (!this.playRequested || this.video.paused || this.video.seeking || this.video.readyState < 2
-          || t <= this.currentTime.peek() + 0.05) return;
+          || t <= this.currentTime.peek() + 0.25) return;
       this.markPlaying();
     }
     if (this.loopRange && t >= this.loopRange.end) {

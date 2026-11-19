@@ -50,6 +50,57 @@ test('reloading the media keeps the title, seeking range and controls data', asy
   } finally { player.destroy(); }
 });
 
+test('reconnecting retries an unexpected pause after the first frame', async () => {
+  const { player, video } = fixture();
+  let paused = true, seeking = false, playCalls = 0;
+  Object.defineProperties(video, {
+    paused: { get: () => paused },
+    seeking: { get: () => seeking },
+    readyState: { get: () => seeking ? 2 : 3 },
+  });
+  video.play = async () => {
+    playCalls++;
+    paused = false;
+    video.dispatchEvent(new window.Event('playing'));
+  };
+  try {
+    await player.load({ url: 'https://media.example/episode.mp4' });
+    await player.reloadSource(42);
+    video.currentTime = 42.08;
+    video.dispatchEvent(new window.Event('timeupdate'));
+    paused = seeking = true;
+    video.dispatchEvent(new window.Event('pause'));
+    assert.equal(playCalls, 2);
+    seeking = false;
+    video.dispatchEvent(new window.Event('seeked'));
+    assert.equal(playCalls, 3);
+    video.currentTime = 42.3;
+    video.dispatchEvent(new window.Event('timeupdate'));
+    assert.equal(player.getState(), PlayerState.PLAYING);
+    paused = true;
+    video.dispatchEvent(new window.Event('pause'));
+    video.dispatchEvent(new window.Event('canplay'));
+    assert.equal(playCalls, 3);
+  } finally { player.destroy(); }
+});
+
+test('a viewer pause cancels automatic playback while reconnecting', async () => {
+  const { player, video } = fixture();
+  let calls = 0;
+  video.play = async () => { calls++; };
+  Object.defineProperty(video, 'readyState', { value: 2 });
+  try {
+    await player.load({ url: 'https://media.example/episode.mp4' });
+    await player.reloadSource(42);
+    player.pause();
+    video.dispatchEvent(new window.Event('pause'));
+    video.dispatchEvent(new window.Event('seeked'));
+    video.dispatchEvent(new window.Event('canplay'));
+    assert.equal(calls, 2);
+    assert.equal(player.getState(), PlayerState.PAUSED);
+  } finally { player.destroy(); }
+});
+
 test('only the active engine applies the saved quality, even after several reconnects', async () => {
   const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
